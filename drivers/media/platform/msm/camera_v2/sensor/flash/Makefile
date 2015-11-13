@@ -9,3 +9,7 @@ obj-$(CONFIG_MSMB_CAMERA) += bd7710.o
 obj-$(CONFIG_MSMB_CAMERA) += msm_led_torch.o
 obj-$(CONFIG_MSMB_CAMERA) += msm_flash.o
 obj-$(CONFIG_MSMB_CAMERA) += lm3642.o
+
+ifneq ($(findstring namek_msm8916, $(TARGET_PRODUCT)),)
+obj-$(CONFIG_MSMB_CAMERA) += msm_led_trigger_namek.o
+endif
