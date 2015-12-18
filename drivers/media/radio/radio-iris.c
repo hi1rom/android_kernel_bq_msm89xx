@@ -37,7 +37,6 @@
 #include <media/v4l2-ioctl.h>
 #include <media/radio-iris.h>
 #include <asm/unaligned.h>
-#include <linux/of_gpio.h>
 
 static unsigned int rds_buf = 100;
 static int oda_agt;
@@ -51,12 +50,8 @@ static char utf_8_flag;
 static char rt_ert_flag;
 static char formatting_dir;
 static unsigned char sig_blend = CTRL_ON;
-/* BEGIN: Added by TinyPi for DTV FM switch 2015/3/24 */
-#ifdef CONFIG_DTV_FM_SW
-static int dtv_fm_switch;
-#endif
-/* END:   Added by TinyPi for DTV FM switch 2015/3/24   PN: */
 static DEFINE_MUTEX(iris_fm);
+static int transport_ready = -1;
 
 module_param(rds_buf, uint, 0);
 MODULE_PARM_DESC(rds_buf, "RDS buffer entries: *100*");
@@ -126,7 +121,6 @@ struct iris_device {
 	struct hci_fm_data_rd_rsp default_data;
 	struct hci_fm_spur_data spur_data;
 	unsigned char is_station_valid;
-	struct hci_fm_blend_table blend_tbl;
 };
 
 static struct video_device *priv_videodev;
@@ -1256,31 +1250,6 @@ static int hci_fm_get_ch_det_th(struct radio_hci_dev *hdev,
 	return radio_hci_send_cmd(hdev, opcode, 0, NULL);
 }
 
-static int hci_fm_get_blend_tbl(struct radio_hci_dev *hdev,
-		unsigned long param)
-{
-	u16 opcode = hci_opcode_pack(HCI_OGF_FM_RECV_CTRL_CMD_REQ,
-				HCI_OCF_FM_GET_BLND_TBL);
-	return radio_hci_send_cmd(hdev, opcode, 0, NULL);
-}
-
-static int hci_fm_set_blend_tbl(struct radio_hci_dev *hdev,
-		unsigned long param)
-{
-	struct hci_fm_blend_table *blnd_tbl =
-			 (struct hci_fm_blend_table *) param;
-	u16 opcode;
-
-	if (blnd_tbl == NULL) {
-		FMDERR("%s, blend tbl is null\n", __func__);
-		return -EINVAL;
-	}
-	opcode = hci_opcode_pack(HCI_OGF_FM_RECV_CTRL_CMD_REQ,
-			HCI_OCF_FM_SET_BLND_TBL);
-	return radio_hci_send_cmd(hdev, opcode,
-			sizeof(struct hci_fm_blend_table), blnd_tbl);
-}
-
 static int radio_hci_err(__u32 code)
 {
 	switch (code) {
@@ -1723,16 +1692,6 @@ static int hci_fm_get_spur_tbl_data(struct radio_hci_dev *hdev,
 	return radio_hci_send_cmd(hdev, opcode, sizeof(int), &spur_freq);
 }
 
-static int hci_set_blend_tbl_req(struct hci_fm_blend_table *arg,
-		struct radio_hci_dev *hdev)
-{
-	int ret = 0;
-	struct hci_fm_blend_table *blend_tbl = arg;
-	ret = radio_hci_request(hdev, hci_fm_set_blend_tbl,
-		 (unsigned long)blend_tbl, RADIO_HCI_TIMEOUT);
-	return ret;
-}
-
 static int hci_cmd(unsigned int cmd, struct radio_hci_dev *hdev)
 {
 	int ret = 0;
@@ -1823,10 +1782,6 @@ static int hci_cmd(unsigned int cmd, struct radio_hci_dev *hdev)
 		break;
 	case HCI_FM_GET_DET_CH_TH_CMD:
 		ret = radio_hci_request(hdev, hci_fm_get_ch_det_th, arg,
-					msecs_to_jiffies(RADIO_HCI_TIMEOUT));
-		break;
-	case HCI_FM_GET_BLND_TBL_CMD:
-		ret = radio_hci_request(hdev, hci_fm_get_blend_tbl, arg,
 					msecs_to_jiffies(RADIO_HCI_TIMEOUT));
 		break;
 	default:
@@ -2320,28 +2275,6 @@ static void hci_cc_get_ch_det_threshold_rsp(struct radio_hci_dev *hdev,
 	radio_hci_req_complete(hdev, status);
 }
 
-static void hci_cc_get_blend_tbl_rsp(struct radio_hci_dev *hdev,
-		struct sk_buff *skb)
-{
-	struct iris_device *radio = video_get_drvdata(video_get_dev());
-	u8  status;
-
-	if (unlikely(radio == NULL)) {
-		FMDERR(":radio is null");
-		return;
-	}
-	if (unlikely(skb == NULL)) {
-		FMDERR("%s, socket buffer is null\n", __func__);
-		return;
-	}
-	status = skb->data[0];
-	if (!status)
-		memcpy(&radio->blend_tbl, &skb->data[1],
-			sizeof(struct hci_fm_blend_table));
-
-	radio_hci_req_complete(hdev, status);
-}
-
 static inline void hci_cmd_complete_event(struct radio_hci_dev *hdev,
 		struct sk_buff *skb)
 {
@@ -2384,7 +2317,6 @@ static inline void hci_cmd_complete_event(struct radio_hci_dev *hdev,
 	case hci_recv_ctrl_cmd_op_pack(HCI_OCF_FM_EN_WAN_AVD_CTRL):
 	case hci_recv_ctrl_cmd_op_pack(HCI_OCF_FM_EN_NOTCH_CTRL):
 	case hci_recv_ctrl_cmd_op_pack(HCI_OCF_FM_SET_CH_DET_THRESHOLD):
-	case hci_recv_ctrl_cmd_op_pack(HCI_OCF_FM_SET_BLND_TBL):
 	case hci_trans_ctrl_cmd_op_pack(HCI_OCF_FM_RDS_RT_REQ):
 	case hci_trans_ctrl_cmd_op_pack(HCI_OCF_FM_RDS_PS_REQ):
 	case hci_common_cmd_op_pack(HCI_OCF_FM_DEFAULT_DATA_WRITE):
@@ -2456,9 +2388,6 @@ static inline void hci_cmd_complete_event(struct radio_hci_dev *hdev,
 		break;
 	case hci_recv_ctrl_cmd_op_pack(HCI_OCF_FM_GET_CH_DET_THRESHOLD):
 		hci_cc_get_ch_det_threshold_rsp(hdev, skb);
-		break;
-	case hci_recv_ctrl_cmd_op_pack(HCI_OCF_FM_GET_BLND_TBL):
-		hci_cc_get_blend_tbl_rsp(hdev, skb);
 		break;
 	default:
 		FMDERR("%s opcode 0x%x", hdev->name, opcode);
@@ -3579,22 +3508,6 @@ static int iris_vidioc_g_ctrl(struct file *file, void *priv,
 			ctrl->value |= (cf0 << 24);
 		}
 		break;
-	case V4L2_CID_PRIVATE_BLEND_SINRHI:
-		retval = hci_cmd(HCI_FM_GET_BLND_TBL_CMD, radio->fm_hdev);
-		if (retval < 0) {
-			FMDERR("Failed to get blend table  %d", retval);
-			goto END;
-		}
-		ctrl->value = radio->blend_tbl.scBlendSinrHi;
-		break;
-	case V4L2_CID_PRIVATE_BLEND_RMSSIHI:
-		retval = hci_cmd(HCI_FM_GET_BLND_TBL_CMD, radio->fm_hdev);
-		if (retval < 0) {
-			FMDERR("Failed to get blend table  %d", retval);
-			goto END;
-		}
-		ctrl->value = radio->blend_tbl.scBlendRmssiHi;
-		break;
 	default:
 		retval = -EINVAL;
 		break;
@@ -3604,9 +3517,8 @@ END:
 	if (retval > 0)
 		retval = -EINVAL;
 	if (retval < 0)
-		FMDERR("get control failed with %d\n", retval);
-	if (ctrl != NULL)
-		FMDERR("get control failed id: %d\n", ctrl->id);
+		FMDERR("get control failed with %d, id: %d\n",
+			retval, ctrl->id);
 
 	return retval;
 }
@@ -3984,19 +3896,6 @@ static int iris_vidioc_s_ctrl(struct file *file, void *priv,
 				radio->mode = FM_RECV;
 				iris_q_event(radio, IRIS_EVT_RADIO_READY);
 			}
-			/* BEGIN: Added by TinyPi for DTV FM switch 2015/3/24 */
-#ifdef CONFIG_DTV_FM_SW
-			retval = gpio_direction_output(dtv_fm_switch, 0);
-			if (retval) {
-				pr_err( "set_direction for fm_switch gpio failed\n");
-				goto END;
-			}
-			gpio_set_value(dtv_fm_switch, 1);
-			msleep(10);
-
-			gpio_free(dtv_fm_switch);
-#endif
-			/* END:   Added by TinyPi for DTV FM switch 2015/3/24   PN: */
 			break;
 		case FM_TRANS:
 			if (is_enable_tx_possible(radio) != 0) {
@@ -4056,20 +3955,6 @@ static int iris_vidioc_s_ctrl(struct file *file, void *priv,
 			default:
 				retval = -EINVAL;
 			}
-                            /* BEGIN: Added by TinyPi for DTV FM switch 2015/3/24 */
-#ifdef CONFIG_DTV_FM_SW
-      retval = gpio_direction_output(dtv_fm_switch, 0);
-      if (retval) {
-      pr_err( "set_direction for fm_switch gpio failed\n");
-      goto END;
-     }
-     gpio_set_value(dtv_fm_switch, 0);
-     msleep(10);
-
-		gpio_free(dtv_fm_switch);
-
-#endif
-                            /* END:   Added by TinyPi for DTV FM switch 2015/3/24   PN: */
 			break;
 		default:
 			retval = -EINVAL;
@@ -4863,46 +4748,6 @@ static int iris_vidioc_s_ctrl(struct file *file, void *priv,
 		if (retval < 0)
 			FMDERR("get Spur data failed\n");
 		break;
-	case V4L2_CID_PRIVATE_BLEND_SINRHI:
-		if (!is_valid_blend_value(ctrl->value)) {
-			FMDERR("%s: blend sinr count is not valid\n",
-				__func__);
-			retval = -EINVAL;
-			goto END;
-		}
-		retval = hci_cmd(HCI_FM_GET_BLND_TBL_CMD, radio->fm_hdev);
-		if (retval < 0) {
-			FMDERR("Failed to get blend table  %d", retval);
-			goto END;
-		}
-		radio->blend_tbl.scBlendSinrHi = ctrl->value;
-		retval = hci_set_blend_tbl_req(&radio->blend_tbl,
-					 radio->fm_hdev);
-		if (retval < 0) {
-			FMDERR("Failed to set blend tble %d ", retval);
-			goto END;
-		}
-		break;
-	case V4L2_CID_PRIVATE_BLEND_RMSSIHI:
-		if (!is_valid_blend_value(ctrl->value)) {
-			FMDERR("%s: blend rmssi count is not valid\n",
-				__func__);
-			retval = -EINVAL;
-			goto END;
-		}
-		retval = hci_cmd(HCI_FM_GET_BLND_TBL_CMD, radio->fm_hdev);
-		if (retval < 0) {
-			FMDERR("Failed to get blend table  %d", retval);
-			goto END;
-		}
-		radio->blend_tbl.scBlendRmssiHi = ctrl->value;
-		retval = hci_set_blend_tbl_req(&radio->blend_tbl,
-					 radio->fm_hdev);
-		if (retval < 0) {
-			FMDERR("Failed to set blend tble %d ", retval);
-			goto END;
-		}
-		break;
 	default:
 		retval = -EINVAL;
 		break;
@@ -5376,6 +5221,16 @@ static const struct v4l2_ioctl_ops iris_ioctl_ops = {
 	.vidioc_g_ext_ctrls           = iris_vidioc_g_ext_ctrls,
 };
 
+#ifndef MODULE
+extern int radio_hci_smd_init(void);
+static int iris_fops_open(struct file *f) {
+	if (transport_ready < 0) {
+		transport_ready =  radio_hci_smd_init();
+	}
+        return transport_ready;
+}
+#endif
+
 static const struct v4l2_file_operations iris_fops = {
 	.owner = THIS_MODULE,
 	.unlocked_ioctl = video_ioctl2,
@@ -5383,6 +5238,9 @@ static const struct v4l2_file_operations iris_fops = {
 	.compat_ioctl32 = v4l2_compat_ioctl32,
 #endif
 	.release        = iris_fops_release,
+#ifndef MODULE
+	.open           = iris_fops_open,
+#endif
 };
 
 static struct video_device iris_viddev_template = {
@@ -5400,11 +5258,6 @@ static struct video_device *video_get_dev(void)
 static int __init iris_probe(struct platform_device *pdev)
 {
 	struct iris_device *radio;
- /* BEGIN: Added by TinyPi for DTV FM switch 2015/3/24 */
-#ifdef CONFIG_DTV_FM_SW
-	struct device_node *node = pdev->dev.of_node;
-#endif
- /* END:   Added by TinyPi for DTV FM switch 2015/3/24   PN: */
 	int retval;
 	int radio_nr = -1;
 	int i;
@@ -5493,27 +5346,6 @@ static int __init iris_probe(struct platform_device *pdev)
 			kfree(radio);
 		}
 	}
-
-	/* BEGIN: Added by TinyPi for DTV FM switch 2015/3/24 */
-#ifdef CONFIG_DTV_FM_SW
-		dtv_fm_switch = of_get_named_gpio(node, "mdtv,dtv_fm_sw", 0);
-		if (dtv_fm_switch < 0) {
-			dev_err(&pdev->dev,
-				"Looking up %s property in node %s failed. rc =  %d\n",
-				"dtv-fm-sw-pin", node->full_name, dtv_fm_switch);
-			return dtv_fm_switch;
-		}
-
-		if (gpio_is_valid(dtv_fm_switch)) {
-			retval = gpio_request(dtv_fm_switch, "DTV_FM_SW");
-		if (retval) {
-				pr_err("%s: Failed to request gpio %d,rc = %d\n",
-				__func__, dtv_fm_switch, retval);
-				return retval;
-			}
-		}
-#endif
-	/* END:   Added by TinyPi for DTV FM switch 2015/3/24	PN: */
 	return 0;
 }
 
