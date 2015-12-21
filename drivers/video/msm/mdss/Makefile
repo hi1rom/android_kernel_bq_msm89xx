@@ -1,6 +1,6 @@
-ifeq ($(TARGET_PRODUCT),namek_msm8916_32)
+
 EXTRA_CFLAGS += -D NAMEK_PWM_LOW
-endif
+
 
 ccflags-y += -I$(src)
 

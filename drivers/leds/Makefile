@@ -1,9 +1,6 @@
-ifeq ($(TARGET_PRODUCT),namek_msm8916_64)
+
 	EXTRA_CFLAGS += -DBLINK_BRIGHTNESS
-endif
-ifeq ($(TARGET_PRODUCT),namek_msm8916_32)
-	EXTRA_CFLAGS += -DBLINK_BRIGHTNESS
-endif
+
 # LED Core
 obj-$(CONFIG_NEW_LEDS)			+= led-core.o
 obj-$(CONFIG_LEDS_CLASS)		+= led-class.o
